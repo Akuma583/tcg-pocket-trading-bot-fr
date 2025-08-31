@@ -9,8 +9,7 @@
     "deploy-commands": "node ./commands/deploy-commands.js",
     "get-cards": "node ./database/seeders/scrape-tradeable-cards.js",
     "build-fr-dict": "node ./scripts/build-pokemon-fr-dict.js",
-    "start": "node index.js",
-
+    "start": "node index.js"
   },
   "engines": { "node": ">=20" },
   "repository": {
