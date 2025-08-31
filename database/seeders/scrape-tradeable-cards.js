@@ -1,64 +1,212 @@
+// database/seeders/scrape-tradeable-cards.js
 import axios from 'axios';
 import cheerio from 'cheerio';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
 import db from '../models/index.js';
 import card from '../models/card.js';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// -----------------------------
+// Dicos FR (cartes + sets) avec logs
+// -----------------------------
+const cardsDictPath = path.resolve(__dirname, '../../translations/cards-fr.json');
+const setsDictPath  = path.resolve(__dirname, '../../translations/sets-fr.json');
+
+function loadJsonSafe(p, label) {
+  if (!fs.existsSync(p)) {
+    console.warn(`[TRAD] Fichier ${label} introuvable → fallback EN`);
+    return {};
+  }
+  try {
+    const raw = fs.readFileSync(p, 'utf-8');
+    const obj = JSON.parse(raw);
+    console.log(`[TRAD] ${label} chargé (${Object.keys(obj).length} entrées)`);
+    return obj;
+  } catch (e) {
+    console.error(`[TRAD] Erreur JSON ${label}:`, e.message, '→ fallback EN');
+    return {};
+  }
+}
+
+const cardsDict = loadJsonSafe(cardsDictPath, 'cards-fr.json');
+const setsDict  = loadJsonSafe(setsDictPath,  'sets-fr.json');
+
+const missingCards = new Set();
+const missingSets  = new Set();
+
+// -----------------------------
+// Traduction du nom de carte (gère suffixe "ex")
+// -----------------------------
+function translateCard(nameEN) {
+  if (!nameEN) return nameEN;
+  let base = nameEN.trim();
+  let suffix = '';
+
+  // " ex" à la fin (insensible à la casse)
+  const m = base.match(/\s+ex$/i);
+  if (m) {
+    suffix = ' ex';
+    base = base.slice(0, -m[0].length).trim();
+  }
+
+  const frBase = cardsDict[base];
+  if (!frBase) missingCards.add(base);
+  return (frBase ?? base) + suffix; // fallback EN si absent
+}
+
+// -----------------------------
+// Traduction du set (EN -> FR) avec fallback EN
+// -----------------------------
+function translateSet(setEN) {
+  if (!setEN) return setEN;
+  const fr = setsDict[setEN];
+  if (!fr) missingSets.add(setEN);
+  return fr ?? setEN;
+}
+
+function absolutizeImage(src) {
+  if (!src) return null;
+  if (src.startsWith('http://') || src.startsWith('https://')) return src;
+  return `https://pocket.limitlesstcg.com${src}`;
+}
+
+// -----------------------------
+// Scraping
+// -----------------------------
 async function scrapeSite(url) {
-	const { data } = await axios.get(url);
-	const $ = cheerio.load(data);
-	const results = [];
-	$('div.card-page-main').each((i, elem) => {
-		const imgSrc = $(elem).find('img.card').attr('src');
-		const cardName = $(elem).find('span.card-text-name').text();
-        let packSet = $(elem).find('div.prints-current-details span:first-of-type').text();
-        packSet = packSet.substring(0, packSet.indexOf("(")).trim();
-        let rarity = $(elem).find('div.prints-current-details span:nth-of-type(2)').text().split('◊').length - 1;
-        // TODO: Should rewrite at some point when allowed tradeable rarities change
-        rarity = (rarity === 0) ? 5 : rarity;
+  const { data } = await axios.get(url);
+  const $ = cheerio.load(data);
 
-        const id = `${cardName} ${packSet} ${rarity}`;
+  const seen = new Set();
+  const results = [];
 
-		results.push({ id, cardName, packSet, rarity, imgSrc });
-	});
+  $('div.card-page-main').each((i, elem) => {
+    const $elem = $(elem);
 
-    return results;
-};
+    const imgSrc = absolutizeImage($elem.find('img.card').attr('src')?.trim() ?? null);
+    const cardNameEN = $elem.find('span.card-text-name').text().trim();
 
+    // "NomDuSet (A? 000/000)" → on garde juste le nom du set
+    const detailsText = $elem.find('div.prints-current-details span:first-of-type').text().trim();
+    const packSetNameEN = detailsText.split('(')[0].trim();
+
+    // Rareté (◊). 0 → 5
+    let rarity = $elem.find('div.prints-current-details span:nth-of-type(2)')
+      .text()
+      .split('◊').length - 1;
+    rarity = (rarity === 0) ? 5 : rarity;
+
+    const cardNameFR     = translateCard(cardNameEN);
+    const packSetLabelFR = translateSet(packSetNameEN);
+
+    // id stable basé sur EN (comme à l’origine) pour ne pas casser les FK
+    const id = `${cardNameEN} ${packSetNameEN} ${rarity}`;
+    if (seen.has(id)) return;
+    seen.add(id);
+
+    results.push({
+      id,
+      cardName: cardNameFR,     // FR pour l’affichage
+      packSet: packSetLabelFR,  // set FR si dispo, sinon EN (fallback)
+      rarity,
+      imgSrc,
+    });
+  });
+
+  console.log(`[LOG] Scrape OK — ${results.length} cartes.`);
+  return results;
+}
+
+// -----------------------------
+// Mise à jour de la DB (safe pour les FK UserCards)
+// -----------------------------
 async function updateCards(scrapedResults) {
-    const cards = card(db.sequelize, db.Sequelize.DataTypes);
+  const Cards = card(db.sequelize, db.Sequelize.DataTypes);
+  const sequelize = db.sequelize;
 
-    // Delete all entries in table first, start clean
-    // cards.sync({ force: true });
-    
-    for (const result of scrapedResults) {
-        const existingCard = await cards.findOne({
-            where: {
-                id: result.id,
-                name: result.cardName,
-                packSet: result.packSet,
-                rarity: result.rarity
-            }
-        });
+  // 1) Upsert de toutes les cartes scrappées
+  for (const r of scrapedResults) {
+    await Cards.upsert({
+      id: r.id,
+      name: r.cardName,
+      image: r.imgSrc,
+      packSet: r.packSet,
+      rarity: r.rarity,
+    });
+  }
 
-        if (!existingCard) {
-            await cards.create({
-                id: result.id,
-                name: result.cardName,
-                image: result.imgSrc,
-                packSet: result.packSet,
-                rarity: result.rarity
-            });
-            console.log(`[LOG] Added new card: ${result.cardName} from ${result.packSet}, rarity ${result.rarity}`);
-        } else {
-            console.log(`[LOG] Card already exists in database: ${result.cardName} from ${result.packSet}, rarity ${result.rarity}`);
-        }
-    }
-};
+  // 2) Nettoyage doux : supprimer les cartes devenues obsolètes
+  //    UNIQUEMENT si elles ne sont référencées par aucun UserCards
+  const idsToKeep = scrapedResults.map(r => r.id);
+  await sequelize.query(
+    `
+    DELETE FROM "Cards" c
+    WHERE c.id NOT IN (:ids)
+      AND NOT EXISTS (
+        SELECT 1 FROM "UserCards" uc WHERE uc.card_id = c.id
+      )
+    `,
+    { replacements: { ids: idsToKeep } }
+  );
 
-// URL is a query for all currently tradeable cards in Pocket TCG - first four sets; 1 diamond through 1 star rarity
-scrapeSite(
-    'https://pocket.limitlesstcg.com/cards/?q=%21set%3AA3%2CA3b%2CA3a%2CA1%2CA1a%2CA2b%2CA2%2CA2a+rarity%3A1%2C2%2C3%2C4%2C5+display%3Afull+sort%3Aname&show=all')
-    .then(result => {
-        console.log(`[LOG] Successfully scraped ${result.length} tradeable cards.`);
-        updateCards(result);
-	}).catch(err => console.log(err));
+  console.log(`[LOG] Upsert terminé : ${scrapedResults.length} cartes traitées.`);
+
+  // 3) Logs des noms/sets manquants
+  const missingDir = path.resolve(__dirname, '../../translations/_missing');
+  if (!fs.existsSync(missingDir)) fs.mkdirSync(missingDir, { recursive: true });
+
+  if (missingCards.size) {
+    fs.writeFileSync(
+      path.join(missingDir, 'missing-cards.txt'),
+      Array.from(missingCards).sort().join('\n'),
+      'utf-8'
+    );
+    console.log(`ℹ️  Cartes sans traduction FR: ${missingCards.size} → translations/_missing/missing-cards.txt`);
+  }
+  if (missingSets.size) {
+    fs.writeFileSync(
+      path.join(missingDir, 'missing-sets.txt'),
+      Array.from(missingSets).sort().join('\n'),
+      'utf-8'
+    );
+    console.log(`ℹ️  Sets sans traduction FR: ${missingSets.size} → translations/_missing/missing-sets.txt`);
+  }
+}
+
+// -----------------------------
+// Execution
+// -----------------------------
+const LIMITLESS_URL =
+  'https://pocket.limitlesstcg.com/cards/?q=display%3Afull+sort%3Aname&show=all';
+
+
+console.log('[LOG] Successfully initialized models for environment:', process.env.NODE_ENV ?? 'development');
+
+scrapeSite(LIMITLESS_URL)
+  .then(async (results) => {
+    console.log(`[DBG] Nombre de cartes scrappées: ${results.length}`);
+
+    // Cherche explicitement Suicune / Scizor dans les résultats bruts
+    const foundSuicune = results.find(c =>
+      /suicune/i.test(c.id) || /suicune/i.test(c.cardName)
+    );
+    const foundScizor = results.find(c =>
+      /scizor/i.test(c.id) || /scizor/i.test(c.cardName) || /cizayox/i.test(c.cardName)
+    );
+
+    console.log(`[DBG] Suicune trouvé ? ${foundSuicune ? 'OUI' : 'NON'}`);
+    if (foundSuicune) console.log('[DBG] Exemple Suicune:', foundSuicune);
+
+    console.log(`[DBG] Scizor/Cizayox trouvé ? ${foundScizor ? 'OUI' : 'NON'}`);
+    if (foundScizor) console.log('[DBG] Exemple Scizor:', foundScizor);
+
+    // On continue normalement
+    await updateCards(results);
+  })
+  .then(() => console.log('✅ Import FR (noms & sets) terminé.'))
+  .catch(err => console.error('❌ Erreur scrape:', err.message));
