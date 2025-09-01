@@ -1,19 +1,21 @@
+// database/config/config.js
 import 'dotenv/config';
+
+const common = {
+  url: process.env.DATABASE_URL,
+  dialect: 'postgres',
+  logging: false,
+};
 
 export default {
   development: {
-    url: process.env.DATABASE_URL,
-    dialect: 'postgres',
+    ...common,
     dialectOptions: {
-      ssl: {
-        require: true,
-        rejectUnauthorized: false, // obligatoire pour Railway
-      },
+      ssl: false, // en local, pas besoin de SSL
     },
   },
   test: {
-    url: process.env.DATABASE_URL,
-    dialect: 'postgres',
+    ...common,
     dialectOptions: {
       ssl: {
         require: true,
@@ -22,12 +24,11 @@ export default {
     },
   },
   production: {
-    url: process.env.DATABASE_URL,
-    dialect: 'postgres',
+    ...common,
     dialectOptions: {
       ssl: {
         require: true,
-        rejectUnauthorized: false,
+        rejectUnauthorized: false, // Railway/Postgres impose SSL
       },
     },
   },
