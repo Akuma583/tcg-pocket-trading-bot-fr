@@ -76,10 +76,12 @@ function absolutizeImage(src) {
 }
 
 // -----------------------------
-// Scraping
+// Scrape d'une page Limitless (URL déjà construite)
 // -----------------------------
 async function scrapeSite(url) {
-  const { data } = await axios.get(url);
+  const { data } = await axios.get(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (TCG-Pocket-Discord-Bot)' }
+  });
   const $ = cheerio.load(data);
 
   const seen = new Set();
@@ -91,7 +93,7 @@ async function scrapeSite(url) {
     const imgSrc = absolutizeImage($elem.find('img.card').attr('src')?.trim() ?? null);
     const cardNameEN = $elem.find('span.card-text-name').text().trim();
 
-    // "NomDuSet (A? 000/000)" → on garde juste le nom du set
+    // "NomDuSet (A? 000/000)" → on garde juste le nom du set EN
     const detailsText = $elem.find('div.prints-current-details span:first-of-type').text().trim();
     const packSetNameEN = detailsText.split('(')[0].trim();
 
@@ -118,7 +120,64 @@ async function scrapeSite(url) {
     });
   });
 
-  console.log(`[LOG] Scrape OK — ${results.length} cartes.`);
+  return results;
+}
+
+// -----------------------------
+// Scrape multi-sets (plus fiable que la page globale)
+// -----------------------------
+// NOTE: adapte/complète les codes en fonction de Limitless.
+// A1/A1a = base + mini-set ; A2/A2a/A2b ; A3/A3a/A3b ; etc.
+const SET_CODES = [
+  'A1', 'A1a',
+  'A2', 'A2a', 'A2b',
+  'A3', 'A3a', 'A3b',
+  // Ajoute ici les séries suivantes quand elles sortent :
+  'A4', 'A4a', 'A4b'
+];
+
+function buildUrlForSet(setCode) {
+  // %21 = !, donc !set:A1 filtre précisément le set
+  return `https://pocket.limitlesstcg.com/cards/?q=%21set%3A${encodeURIComponent(setCode)}+display%3Afull+sort%3Aname&show=all`;
+}
+
+async function scrapeOneSet(setCode) {
+  const url = buildUrlForSet(setCode);
+  const rows = await scrapeSite(url);
+  console.log(`[DBG] ${setCode} → ${rows.length} cartes`);
+  return rows;
+}
+
+// -----------------------------
+// Seconde passe optionnelle: recherche par noms
+// -----------------------------
+const EXTRA_QUERY_NAMES = [
+  // Ajoute ici des noms qui manqueraient malgré le scrape des sets
+  // 'Suicune', 'Scizor', 'Lugia', 'Ho-Oh'
+];
+
+async function scrapeByNameList(names = []) {
+  const results = [];
+  const seen = new Set();
+
+  for (const rawName of names) {
+    const q = encodeURIComponent(`name:${rawName}`);
+    const url = `https://pocket.limitlesstcg.com/cards/?q=${q}+display%3Afull+sort%3Aname&show=all`;
+    try {
+      const rows = await scrapeSite(url);
+      for (const r of rows) {
+        if (seen.has(r.id)) continue;
+        seen.add(r.id);
+        results.push(r);
+      }
+      console.log(`[DBG] name:${rawName} → ${rows.length} cartes`);
+      // petite pause pour rester sympa
+      await new Promise(res => setTimeout(res, 250));
+    } catch (e) {
+      console.warn(`[DBG] Échec scrapeByName "${rawName}": ${e.message}`);
+    }
+  }
+  console.log(`[DBG] scrapeByName total: ${results.length} cartes.`);
   return results;
 }
 
@@ -179,34 +238,36 @@ async function updateCards(scrapedResults) {
 }
 
 // -----------------------------
-// Execution
+// Exécution (multi-sets + extras noms)
 // -----------------------------
-const LIMITLESS_URL =
-  'https://pocket.limitlesstcg.com/cards/?q=display%3Afull+sort%3Aname&show=all';
-
-
 console.log('[LOG] Successfully initialized models for environment:', process.env.NODE_ENV ?? 'development');
 
-scrapeSite(LIMITLESS_URL)
-  .then(async (results) => {
-    console.log(`[DBG] Nombre de cartes scrappées: ${results.length}`);
+(async () => {
+  try {
+    // 1) Scrape set par set
+    const allBySet = [];
+    for (const code of SET_CODES) {
+      const rows = await scrapeOneSet(code);
+      allBySet.push(...rows);
+      // petite pause entre les sets
+      await new Promise(r => setTimeout(r, 250));
+    }
 
-    // Cherche explicitement Suicune / Scizor dans les résultats bruts
-    const foundSuicune = results.find(c =>
-      /suicune/i.test(c.id) || /suicune/i.test(c.cardName)
-    );
-    const foundScizor = results.find(c =>
-      /scizor/i.test(c.id) || /scizor/i.test(c.cardName) || /cizayox/i.test(c.cardName)
-    );
+    // 2) Seconde passe optionnelle par noms (si tu en as listé)
+    const extras = await scrapeByNameList(EXTRA_QUERY_NAMES);
 
-    console.log(`[DBG] Suicune trouvé ? ${foundSuicune ? 'OUI' : 'NON'}`);
-    if (foundSuicune) console.log('[DBG] Exemple Suicune:', foundSuicune);
+    // 3) Merge dédoublonné
+    const byId = new Map();
+    for (const r of [...allBySet, ...extras]) byId.set(r.id, r);
+    const merged = Array.from(byId.values());
 
-    console.log(`[DBG] Scizor/Cizayox trouvé ? ${foundScizor ? 'OUI' : 'NON'}`);
-    if (foundScizor) console.log('[DBG] Exemple Scizor:', foundScizor);
+    console.log(`[LOG] Total fusionné (tous sets + extras) : ${merged.length} cartes.`);
 
-    // On continue normalement
-    await updateCards(results);
-  })
-  .then(() => console.log('✅ Import FR (noms & sets) terminé.'))
-  .catch(err => console.error('❌ Erreur scrape:', err.message));
+    // 4) Mise à jour DB
+    await updateCards(merged);
+
+    console.log('✅ Import FR (noms & sets) terminé (multi-sets).');
+  } catch (err) {
+    console.error('❌ Erreur scrape:', err.message);
+  }
+})();

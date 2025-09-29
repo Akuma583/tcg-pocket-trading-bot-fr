@@ -32,9 +32,7 @@ Cynthia
 Cyrus
 Dark Pendant
 Dawn
-Dawn Wings Necrozma
 Dome Fossil
-Dusk Mane Necrozma
 Eevee Bag
 Electrical Cord
 Elemental Switch
@@ -50,7 +48,6 @@ Giant Cape
 Giovanni
 Gladion
 Guzma
-Hand Scope
 Hau
 Heat Rotom
 Helix Fossil
@@ -76,3 +73,37 @@ Mallow
 Mars
 Memory Light
 Misty
+Morty
+Mow Rotom
+Mythical Slab
+Old Amber
+Origin Forme Dialga
+Origin Forme Palkia
+Paldean Clodsire
+Paldean Tauros
+Paldean Wooper
+Penny
+Poison Barb
+Poké Ball
+Pokémon Center Lady
+Pokémon Communication
+Pokémon Flute
+Rare Candy
+Red
+Repel
+Rescue Scarf
+Rocky Helmet
+Rotom Dex
+Sabrina
+Silver
+Skull Fossil
+Sophocles
+Squirt Bottle
+Steel Apron
+Team Galactic Grunt
+Team Rocket Grunt
+Traveling Merchant
+Volkner
+Wash Rotom
+Whitney
+Will
